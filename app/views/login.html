@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Voice Login</title>
+</head>
+<body>
+    <h2>Voice Authentication</h2>
+    <button onclick="startAuth()">Record & Authenticate (3s)</button>
+    <p id="result"></p>
+
+    <script>
+    async function startAuth() {
+        const btn = document.querySelector('button');
+        btn.disabled = true;
+        document.getElementById('result').innerText = 'Recording…';
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const recorder = new MediaRecorder(stream);
+        const chunks = [];
+        recorder.ondataavailable = e => chunks.push(e.data);
+        recorder.start();
+        setTimeout(() => recorder.stop(), 3000);
+        recorder.onstop = async () => {
+            const blob = new Blob(chunks, { type: 'audio/webm' });
+            const form = new FormData();
+            form.append('audio', blob, 'login.webm');
+            const res = await fetch('/predict', { method: 'POST', body: form });
+            const data = await res.json();
+            if (data.status === 'granted') {
+                document.getElementById('result').innerText =
+                  `Access granted: ${data.user} (p=${data.score.toFixed(2)})`;
+            } else {
+                document.getElementById('result').innerText = `Access denied`;
+            }
+            btn.disabled = false;
+        };
+    }
+    </script>
+</body>
+</html>
