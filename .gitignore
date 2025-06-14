@@ -1,0 +1,6 @@
+git_token.txt
+data/*
+cvenv/*
+mlenv/*
+models/*
+.ipynb_checkpoints/*
