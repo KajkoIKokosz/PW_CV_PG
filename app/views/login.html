@@ -1,39 +1,42 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Voice Login</title>
+  <title>Voice Login</title>
 </head>
 <body>
-    <h2>Voice Authentication</h2>
-    <button onclick="startAuth()">Record & Authenticate (3s)</button>
-    <p id="result"></p>
+  <h2>Voice Authentication</h2>
+  <button id="recordBtn">🎤 Record & Authenticate (3s)</button>
+  <p id="result"></p>
 
-    <script>
-    async function startAuth() {
-        const btn = document.querySelector('button');
-        btn.disabled = true;
-        document.getElementById('result').innerText = 'Recording…';
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        const recorder = new MediaRecorder(stream);
-        const chunks = [];
-        recorder.ondataavailable = e => chunks.push(e.data);
-        recorder.start();
-        setTimeout(() => recorder.stop(), 3000);
-        recorder.onstop = async () => {
-            const blob = new Blob(chunks, { type: 'audio/webm' });
-            const form = new FormData();
-            form.append('audio', blob, 'login.webm');
-            const res = await fetch('/predict', { method: 'POST', body: form });
-            const data = await res.json();
-            if (data.status === 'granted') {
-                document.getElementById('result').innerText =
-                  `Access granted: ${data.user} (p=${data.score.toFixed(2)})`;
-            } else {
-                document.getElementById('result').innerText = `Access denied`;
-            }
-            btn.disabled = false;
-        };
-    }
-    </script>
+  <script>
+    const btn = document.getElementById("recordBtn");
+    const out = document.getElementById("result");
+    let recorder, chunks;
+
+    btn.onclick = async () => {
+      btn.disabled = true;
+      out.textContent = "🔴 Recording...";
+      chunks = [];
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recorder = new MediaRecorder(stream);
+      recorder.start();
+      recorder.ondataavailable = e => chunks.push(e.data);
+      setTimeout(() => recorder.stop(), 3000);
+      recorder.onstop = async () => {
+        out.textContent = "⏳ Processing...";
+        const blob = new Blob(chunks, { type: recorder.mimeType });
+        const fd = new FormData();
+        fd.append("file", blob, "login.webm");
+        const resp = await fetch("/predict", { method: "POST", body: fd });
+        const js = await resp.json();
+        if (js.status === "granted") {
+          out.textContent = `✅ Access granted: ${js.user} (${js.score.toFixed(2)})`;
+        } else {
+          out.textContent = "❌ Access denied";
+        }
+        btn.disabled = false;
+      };
+    };
+  </script>
 </body>
 </html>
