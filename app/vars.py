@@ -1,0 +1,1 @@
+model_path = '/home/dog4/PhD/computer_vision/cvproj/best_model.pt'
