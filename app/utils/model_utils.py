@@ -65,4 +65,7 @@ def predict_from_file(model, file_path: str, classes: list, device):
         out   = model(x)
         probs = torch.softmax(out, dim=1)[0].cpu().numpy()
     idx = int(probs.argmax())
-    return classes[idx], float(probs[idx])
+    # map internal class names to user-facing strings:
+    label = {"classA": "access granted", "classB": "access denied"}.get(classes[idx], classes[idx])
+    return label, float(probs[idx])
+    # return classes[idx], float(probs[idx])
