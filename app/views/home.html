@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Audio Classifier & Retrainer</title>
+</head>
+<body>
+  <h1>1) Upload or Record for Prediction</h1>
+  <form id="uploadForm" action="/predict" method="post" enctype="multipart/form-data">
+    <input type="file" name="file" accept="audio/*" required>
+    <button type="submit">Upload & Predict</button>
+  </form>
+  <p>— or —</p>
+  <button id="recordBtn">🎤 Record & Predict (3s)</button>
+  <p id="result"></p>
+
+  <hr>
+
+  <h1>2) Upload New .wav to Retrain</h1>
+  <form id="retrainForm" action="/retrain" method="post" enctype="multipart/form-data">
+    <input type="file" name="file" accept=".wav" required>
+    <select name="label" required>
+      <option value="">-- select class --</option>
+      <option value="granted">granted</option>
+      <option value="denied">denied</option>
+    </select>
+    <button id="retrainBtn">Upload & Retrain</button>
+  </form>
+
+  <pre id="retrainLog" style="background:#f0f0f0;padding:1em;max-height:300px;overflow:auto;"></pre>
+
+  <script>
+    // Prediction recording logic
+    const recordBtn = document.getElementById('recordBtn');
+    const result    = document.getElementById('result');
+    recordBtn.onclick = async () => {
+      recordBtn.disabled = true;
+      result.textContent = '🔴 Recording…';
+      try {
+        const stream   = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const recorder = new MediaRecorder(stream);
+        let chunks     = [];
+        recorder.ondataavailable = e => chunks.push(e.data);
+        recorder.start();
+        setTimeout(() => recorder.stop(), 3000);
+        recorder.onstop = async () => {
+          result.textContent = '⏳ Uploading…';
+          const blob = new Blob(chunks, { type: recorder.mimeType });
+          const fd = new FormData(); fd.append('file', blob, 'recording.webm');
+          const resp = await fetch('/predict', { method:'POST', body:fd });
+          const js = await resp.json();
+          if (resp.ok) {
+            result.textContent = `Label: ${js.label} (score: ${js.score.toFixed(2)})`;
+          } else {
+            result.textContent = `❌ Error: ${js.error||'Unknown'}`;
+          }
+          recordBtn.disabled = false;
+        };
+      } catch (err) {
+        console.error(err);
+        result.textContent = '❌ Mic access denied';
+        recordBtn.disabled = false;
+      }
+    };
+
+    // Retraining streaming logic
+    const retrainForm = document.getElementById("retrainForm");
+    const retrainBtn  = document.getElementById("retrainBtn");
+    const retrainLog  = document.getElementById("retrainLog");
+
+    retrainForm.addEventListener("submit", async e => {
+      e.preventDefault();
+      retrainLog.textContent = "";
+      retrainBtn.disabled = true;
+      const resp = await fetch("/retrain", { method: "POST", body: new FormData(retrainForm) });
+      if (!resp.ok) {
+        const err = await resp.json().catch(_=>null);
+        retrainLog.textContent = "Error: " + (err?.error || resp.statusText);
+        retrainBtn.disabled = false;
+        return;
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        retrainLog.textContent += decoder.decode(value);
+        retrainLog.scrollTop = retrainLog.scrollHeight;
+      }
+      retrainBtn.disabled = false;
+    });
+  </script>
+</body>
+</html>

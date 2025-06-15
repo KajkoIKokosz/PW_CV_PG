@@ -1,6 +1,6 @@
 import os
 import uuid
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template, Response
 from werkzeug.utils import secure_filename
 
 import torch
@@ -13,20 +13,19 @@ from utils.model_utils import init_model, predict_from_file, ResNetWithDropout
 from utils.audio_utils import save_audio_file, audio_to_spectrogram_image
 
 # ─── CONFIG ───────────────────────────────────────────────────────────────────
-BASE_DIR        = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH      = os.path.join(BASE_DIR, "..", "models", "best_model.pt")
-TRAIN_DATA_DIR  = os.path.join(BASE_DIR, "training_data")   # will contain granted/denied subfolders
+BASE_DIR       = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH     = os.path.join(BASE_DIR, os.pardir, "models", "best_model.pt")
+TRAIN_DATA_DIR = os.path.join(BASE_DIR, "training_data")
+CLASSES        = ["granted", "denied"]
+DEVICE         = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-CLASSES         = ["granted", "denied"]
-DEVICE          = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-# Hyperparams for retraining
-BATCH_SIZE      = 8
-LEARNING_RATE   = 1e-4
-NUM_EPOCHS      = 5
+# Hyperparameters for retraining
+BATCH_SIZE     = 8
+LEARNING_RATE  = 1e-4
+NUM_EPOCHS     = 5
 
 # ─── APP SETUP ────────────────────────────────────────────────────────────────
-app = Flask(__name__)
+app = Flask(__name__, template_folder="views")
 model = init_model(MODEL_PATH, CLASSES, DEVICE)
 
 # ─── DATASET FOR FULL RETRAIN ─────────────────────────────────────────────────
@@ -52,6 +51,7 @@ class AudioTrainDataset(Dataset):
             img = self.transform(img)
         return img, label
 
+# Match inference preprocessing
 train_transform = transforms.Compose([
     transforms.Grayscale(num_output_channels=3),
     transforms.Resize((224, 224)),
@@ -60,21 +60,21 @@ train_transform = transforms.Compose([
 ])
 
 def retrain_model():
-    """Full‐dataset fine‐tune, then overwrite MODEL_PATH and reload global model."""
+    """
+    Performs full-dataset fine-tuning and reloads the global model.
+    """
     dataset = AudioTrainDataset(TRAIN_DATA_DIR, CLASSES, transform=train_transform)
     loader  = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
 
     net = ResNetWithDropout(num_classes=len(CLASSES), dropout_rate=0.5).to(DEVICE)
     checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
-    missing, unexpected = net.load_state_dict(checkpoint, strict=False)
-    print(f"[Retrain] Missing keys: {missing}")
-    print(f"[Retrain] Unexpected keys: {unexpected}")
+    net.load_state_dict(checkpoint, strict=False)
 
     net.train()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(net.parameters(), lr=LEARNING_RATE)
 
-    for epoch in range(1, NUM_EPOCHS + 1):
+    for epoch in range(1, NUM_EPOCHS+1):
         total_loss = 0.0
         for imgs, labels in loader:
             imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
@@ -84,60 +84,53 @@ def retrain_model():
             loss.backward()
             optimizer.step()
             total_loss += loss.item() * imgs.size(0)
+        avg = total_loss / len(dataset)
+        yield_log = f"Epoch {epoch}/{NUM_EPOCHS}   Loss: {avg:.4f}\n"
+        print(yield_log, end="")
+        yield yield_log
 
-        avg_loss = total_loss / len(dataset)
-        print(f"[Retrain] Epoch {epoch}/{NUM_EPOCHS}, Loss: {avg_loss:.4f}")
-
+    # Reload global model
     torch.save(net.state_dict(), MODEL_PATH)
     global model
     model = init_model(MODEL_PATH, CLASSES, DEVICE)
 
+
 def incremental_update(file_path, label_idx, steps=15, lr=5e-4):
     """
-    Fine‐tune the global `model` on one new example so “hard” cases flip correctly.
+    Extra fine-tuning on the single new example for real-time streaming.
     """
     global model
     model.train()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=lr)
 
-    img = audio_to_spectrogram_image(file_path)
-    img = train_transform(img).unsqueeze(0).to(DEVICE)
-    target = torch.tensor([label_idx], device=DEVICE)
+    for step in range(1, steps+1):
+        img = audio_to_spectrogram_image(file_path)
+        img = train_transform(img).unsqueeze(0).to(DEVICE)
+        target = torch.tensor([label_idx], device=DEVICE)
 
-    for _ in range(steps):
         optimizer.zero_grad()
         out = model(img)
         loss = criterion(out, target)
         loss.backward()
         optimizer.step()
 
+        step_log = f"Step {step}/{steps}   Loss: {loss.item():.4f}\n"
+        print(step_log, end="")
+        yield step_log
+
+    # Final save & reload
     torch.save(model.state_dict(), MODEL_PATH)
     model = init_model(MODEL_PATH, CLASSES, DEVICE)
 
 # ─── ROUTES ──────────────────────────────────────────────────────────────────
 @app.route("/", methods=["GET"])
 def home():
-    return render_template_string("""
-    <!doctype html>
-    <title>Audio Classifier & Retrainer</title>
-    <h1>1) Upload or Record for Prediction</h1>
-    <form action="/predict" method="post" enctype="multipart/form-data">
-      <input type="file" name="file" accept="audio/*" required>
-      <button type="submit">Upload & Predict</button>
-    </form>
-    <hr>
-    <h1>2) Upload New .wav to Retrain</h1>
-    <form action="/retrain" method="post" enctype="multipart/form-data">
-      <input type="file" name="file" accept=".wav" required>
-      <select name="label" required>
-        <option value="">-- select class --</option>
-        <option value="granted">granted</option>
-        <option value="denied">denied</option>
-      </select>
-      <button type="submit">Upload & Retrain</button>
-    </form>
-    """), 200
+    return render_template("home.html")
+
+@app.route("/login", methods=["GET"])
+def login():
+    return render_template("login.html")
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -153,33 +146,33 @@ def predict():
 
 @app.route("/retrain", methods=["POST"])
 def retrain_endpoint():
+    # Validation & save
     if "file" not in request.files or "label" not in request.form:
         return jsonify({"error": "Must provide both file and label"}), 400
-
-    f     = request.files["file"]
+    f = request.files["file"]
     label = request.form["label"]
     if label not in CLASSES:
         return jsonify({"error": f"Unknown label: {label}"}), 400
     if not f.filename.lower().endswith(".wav"):
         return jsonify({"error": "Only .wav files accepted for retraining"}), 400
 
-    # Save into training_data/<label>/
     dest_dir = os.path.join(TRAIN_DATA_DIR, label)
     os.makedirs(dest_dir, exist_ok=True)
-    filename  = secure_filename(f.filename)
+    filename = secure_filename(f.filename)
     dest_path = os.path.join(dest_dir, filename)
     f.save(dest_path)
 
-    try:
-        # 1) Full‐dataset retrain
-        retrain_model()
-        # 2) Incremental fine‐tune on this one file
-        idx = CLASSES.index(label)
-        incremental_update(dest_path, idx)
-    except Exception as e:
-        return jsonify({"error": f"Retraining failed: {e}"}), 500
+    # Stream training logs
+    def generate_logs():
+        yield "Starting full retrain...\n"
+        for line in retrain_model():
+            yield line
+        yield "\nStarting incremental update...\n"
+        for line in incremental_update(dest_path, CLASSES.index(label)):
+            yield line
+        yield "\n✅ Retraining complete!\n"
 
-    return jsonify({"status": "retrained", "example": filename}), 200
+    return Response(generate_logs(), mimetype="text/plain; charset=utf-8")
 
 # ─── ENTRYPOINT ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
